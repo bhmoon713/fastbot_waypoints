@@ -1,0 +1,24 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>fastbot_waypoints</name>
+  <version>0.1.0</version>
+  <description>Waypoint action server for FastBot + GTest tests</description>
+  <maintainer email="you@example.com">Your Name</maintainer>
+  <license>BSD-3-Clause</license>
+
+  <!-- Required for generating/installing actions -->
+  <member_of_group>rosidl_interface_packages</member_of_group>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <buildtool_depend>rosidl_default_generators</buildtool_depend>
+
+  <depend>rclcpp</depend>
+  <depend>rclcpp_action</depend>
+  <depend>geometry_msgs</depend>
+  <depend>nav_msgs</depend>
+  <depend>tf2</depend>
+  <depend>tf2_geometry_msgs</depend>
+  <depend>rosidl_default_runtime</depend>
+
+  <test_depend>ament_cmake_gtest</test_depend>
+</package>
