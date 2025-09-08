@@ -1,57 +1,85 @@
 cmake_minimum_required(VERSION 3.8)
 project(fastbot_waypoints)
 
-if(NOT CMAKE_CXX_STANDARD)
-  set(CMAKE_CXX_STANDARD 17)
+if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+  add_compile_options(-Wall -Wextra -Wpedantic)
 endif()
 
+# find dependencies
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
-find_package(rclcpp_action REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
+find_package(std_msgs REQUIRED)
 find_package(tf2 REQUIRED)
-find_package(rosidl_default_generators REQUIRED)
-find_package(ament_cmake_gtest REQUIRED)
+find_package(tf2_ros REQUIRED)
+find_package(tf2_geometry_msgs REQUIRED)
+find_package(action_msgs REQUIRED)
+find_package(rclcpp_action REQUIRED)
+find_package(action_msgs REQUIRED)
+find_package(builtin_interfaces REQUIRED)
 
-# 1) Generate the action interface
-rosidl_generate_interfaces(${PROJECT_NAME}
-  "action/Waypoint.action"
-  DEPENDENCIES geometry_msgs
+find_package(rosidl_default_generators REQUIRED)
+
+# Add this to include generated headers
+include_directories(
+  include
+  ${CMAKE_CURRENT_BINARY_DIR}/rosidl_generator_cpp
 )
 
-# Makes generated headers visible to consumers
+set(action_files
+  "action/Waypoint.action"
+)
+
+rosidl_generate_interfaces(${PROJECT_NAME}
+   ${action_files}
+  DEPENDENCIES builtin_interfaces geometry_msgs
+)
+
 ament_export_dependencies(rosidl_default_runtime)
+ament_export_include_directories(include)
 
 add_executable(fastbot_action_server src/fastbot_action_server.cpp)
-ament_target_dependencies(fastbot_action_server
-  rclcpp rclcpp_action geometry_msgs nav_msgs tf2
+ament_target_dependencies(fastbot_action_server rclcpp rclcpp_action geometry_msgs nav_msgs tf2 tf2_ros)
+
+rosidl_target_interfaces(fastbot_action_server ${PROJECT_NAME} "rosidl_typesupport_cpp")
+
+install(TARGETS
+  fastbot_action_server
+  DESTINATION lib/${PROJECT_NAME}
 )
 
-# 2) Ensure the action types are generated BEFORE compiling, and link typesupport
-add_dependencies(fastbot_action_server ${PROJECT_NAME}__rosidl_generator_cpp)
-rosidl_get_typesupport_target(cpp_typesupport_target ${PROJECT_NAME} "rosidl_typesupport_cpp")
-target_link_libraries(fastbot_action_server ${cpp_typesupport_target})
+if(BUILD_TESTING)
+  #find_package(ament_lint_auto REQUIRED)
+  # the following line skips the linter which checks for copyrights
+  # uncomment the line when a copyright and license is not present in all source files
+  #set(ament_cmake_copyright_FOUND TRUE)
+  # the following line skips cpplint (only works in a git repo)
+  # uncomment the line when this package is not in a git repo
+  #set(ament_cmake_cpplint_FOUND TRUE)
+  #ament_lint_auto_find_test_dependencies()
 
-# (Optional but helpful) Include the generated headers explicitly during build
-target_include_directories(fastbot_action_server PUBLIC
-  $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR>/rosidl_generator_cpp>
-  $<INSTALL_INTERFACE:include>)
+  #find_package(ament_cmake_gtest REQUIRED)
 
-install(TARGETS fastbot_action_server
-  DESTINATION lib/${PROJECT_NAME})
-
-ament_add_gtest(test_waypoints test/test_waypoints.cpp)
-if(TARGET test_waypoints)
-  ament_target_dependencies(test_waypoints
-    rclcpp rclcpp_action geometry_msgs nav_msgs tf2
+  # Include the directories for the generated headers
+  include_directories(
+    include
+    ${CMAKE_CURRENT_BINARY_DIR}/rosidl_generator_cpp
   )
-  add_dependencies(test_waypoints ${PROJECT_NAME}__rosidl_generator_cpp)
-  rosidl_get_typesupport_target(cpp_ts_target ${PROJECT_NAME} "rosidl_typesupport_cpp")
-  target_link_libraries(test_waypoints ${cpp_ts_target})
-  target_include_directories(test_waypoints PUBLIC
-    $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR>/rosidl_generator_cpp>
-    $<INSTALL_INTERFACE:include>)
+
+  ament_add_gtest(test_waypoint_node test/test_waypoint_node.cpp)
+
+  #target_link_libraries(test_waypoint_node
+  #  ${PROJECT_NAME}  )
+
+  #target_link_libraries(test_waypoint_node rclcpp rclcpp_action geometry_msgs nav_msgs tf2 tf2_geometry_msgs)
+  #ament_target_dependencies(test_waypoint_node rclcpp rclcpp_action geometry_msgs nav_msgs tf2 tf2_geometry_msgs)
+  # Ensure the test depends on generated interfaces
+  
+  ament_target_dependencies(test_waypoint_node rclcpp rclcpp_action geometry_msgs nav_msgs tf2 tf2_geometry_msgs )
+ 
+  # Ensure the test links to the generated typesupport
+  rosidl_target_interfaces(test_waypoint_node ${PROJECT_NAME} "rosidl_typesupport_cpp")
 endif()
 
 ament_package()

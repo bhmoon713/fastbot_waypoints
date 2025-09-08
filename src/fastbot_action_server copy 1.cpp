@@ -136,7 +136,7 @@ private:
     double yaw_error;
 
     const double yaw_precision_low = 0.04;
-    // const double yaw_precision_high = 0.07;
+    const double yaw_precision_high = 0.07;
     const double dist_precision_ = 0.05;
 
     while (rclcpp::ok()) {
