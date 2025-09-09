@@ -18,7 +18,7 @@ find_package(action_msgs REQUIRED)
 find_package(rclcpp_action REQUIRED)
 find_package(action_msgs REQUIRED)
 find_package(builtin_interfaces REQUIRED)
-
+find_package(fastbot_waypoints REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
 
 # Add this to include generated headers
