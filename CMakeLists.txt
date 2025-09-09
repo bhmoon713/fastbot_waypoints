@@ -67,19 +67,19 @@ if(BUILD_TESTING)
     ${CMAKE_CURRENT_BINARY_DIR}/rosidl_generator_cpp
   )
 
-  ament_add_gtest(test_waypoint_node test/test_waypoint_node.cpp)
+  ament_add_gtest(test_fastbot_waypoint test/test_fastbot_waypoint.cpp)
 
-  #target_link_libraries(test_waypoint_node
+  #target_link_libraries(test_fastbot_waypoint
   #  ${PROJECT_NAME}  )
 
-  #target_link_libraries(test_waypoint_node rclcpp rclcpp_action geometry_msgs nav_msgs tf2 tf2_geometry_msgs)
-  #ament_target_dependencies(test_waypoint_node rclcpp rclcpp_action geometry_msgs nav_msgs tf2 tf2_geometry_msgs)
+  #target_link_libraries(test_fastbot_waypoint rclcpp rclcpp_action geometry_msgs nav_msgs tf2 tf2_geometry_msgs)
+  #ament_target_dependencies(test_fastbot_waypoint rclcpp rclcpp_action geometry_msgs nav_msgs tf2 tf2_geometry_msgs)
   # Ensure the test depends on generated interfaces
   
-  ament_target_dependencies(test_waypoint_node rclcpp rclcpp_action geometry_msgs nav_msgs tf2 tf2_geometry_msgs )
+  ament_target_dependencies(test_fastbot_waypoint rclcpp rclcpp_action geometry_msgs nav_msgs tf2 tf2_geometry_msgs )
  
   # Ensure the test links to the generated typesupport
-  rosidl_target_interfaces(test_waypoint_node ${PROJECT_NAME} "rosidl_typesupport_cpp")
+  rosidl_target_interfaces(test_fastbot_waypoint ${PROJECT_NAME} "rosidl_typesupport_cpp")
 endif()
 
 ament_package()
