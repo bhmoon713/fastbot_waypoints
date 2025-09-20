@@ -21,13 +21,8 @@ pose:
       x: 1.497041043145493
       y: 1.2551360548561186
       z: 0.2168336231258006
-    orientation:
-      x: 0.0001977065410497517
-      y: -7.678504335708343e-05
-      z: -0.048928986716355836
-      w: 0.9988022373198268
 ``` 
-## for passing result
+### for passing result
 Edit file "test_fastbot_waypoint.cpp"
 LINE112 
 ```bash
@@ -37,27 +32,28 @@ LINE112
   goal.position.y = 2.0;
   double goal_yaw = 1.57;
 ``` 
-## and run below test commands(Terminal 3)
+### and run below test commands(Terminal 3)
 ```bash
 cd ~/ros2_ws && colcon build && source install/setup.bash
 colcon test --packages-select fastbot_waypoints --event-handler=console_direct+
 colcon test-result --all
 ```
 
-## for failing result
+### for failing result
 Edit file "test_fastbot_waypoint.cpp"
 
 strike out LINE118 
+```bash
   // Define the goal for fail
   Waypoint::Goal goal;
     goal.position.x = -1.0;
     goal.position.y = 0.0;
     double goal_yaw = 1.57;
-
-## and run below test commands(Terminal 3)
+```
+### and run below test commands(Terminal 3)
 ```bash
 cd ~/ros2_ws && colcon build && source install/setup.bash
 colcon test --packages-select fastbot_waypoints --event-handler=console_direct+
 colcon test-result --all
-
+```
 

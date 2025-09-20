@@ -109,16 +109,16 @@ protected:
 
 TEST_F(FastbotActionServerTest, RobotReachedGoal) {
   // Define the goal for pass
-  Waypoint::Goal goal;
-  goal.position.x = 2.0;
-  goal.position.y = 2.0;
-  double goal_yaw = 1.57;
+//   Waypoint::Goal goal;
+//     goal.position.x = 2.0;
+//     goal.position.y = 2.0;
+//     double goal_yaw = 1.57;
 
   // Define the goal for fail
-//   Waypoint::Goal goal;
-//     goal.position.x = -1.0;
-//     goal.position.y = 0.0;
-//     double goal_yaw = 1.57;
+  Waypoint::Goal goal;
+    goal.position.x = -1.0;
+    goal.position.y = 0.0;
+    double goal_yaw = 1.57;
 
   double global_goal_yaw = goal_yaw + init_yaw_offset;
 

@@ -87,8 +87,8 @@ private:
   bool success_{false};
   double timeout_sec_{60.0};
 
-  enum class Fsm { FIX_YAW, GO_TO_POINT, FIX_FINAL_YAW };
-  Fsm fsm_{Fsm::FIX_YAW};
+  enum class Fsm { TURN, MOVE, FIX_YAW };
+  Fsm fsm_{Fsm::TURN};
 
   // ==== Action handlers ====
   rclcpp_action::GoalResponse handle_goal(const rclcpp_action::GoalUUID &,
@@ -115,7 +115,7 @@ private:
 
     des_pos_ = goal_handle->get_goal()->position;
     success_ = false;
-    fsm_ = Fsm::FIX_YAW;
+    fsm_ = Fsm::TURN;
 
     auto feedback = std::make_shared<Waypoint::Feedback>();
     auto result   = std::make_shared<Waypoint::Result>();
@@ -149,7 +149,7 @@ private:
       geometry_msgs::msg::Twist cmd; // auto-zeroed
 
       switch (fsm_) {
-        case Fsm::FIX_YAW: {
+        case Fsm::TURN: {
           state_ = "fix yaw";
           const double ang = std::clamp(k_ang_ * err_yaw, -max_angular_speed_, max_angular_speed_);
           if (std::fabs(err_yaw) > yaw_precision_) {
@@ -157,26 +157,26 @@ private:
             cmd.linear.x  = 0.0;
           } else {
             cmd.angular.z = 0.0;
-            fsm_ = Fsm::GO_TO_POINT;
+            fsm_ = Fsm::MOVE;
             // continue to next iteration to compute fresh errors
           }
         } break;
 
-        case Fsm::GO_TO_POINT: {
+        case Fsm::MOVE: {
           state_ = "go to point";
           if (err_pos < dist_precision_) {
-            fsm_ = Fsm::FIX_FINAL_YAW;
+            fsm_ = Fsm::FIX_YAW;
             break;
           }
           if (std::fabs(err_yaw) > yaw_precision_) {
-            fsm_ = Fsm::FIX_YAW;
+            fsm_ = Fsm::TURN;
             break;
           }
           cmd.angular.z = 0.0;
           cmd.linear.x  = std::clamp(k_lin_ * err_pos, 0.0, max_linear_speed_);
         } break;
 
-        case Fsm::FIX_FINAL_YAW: {
+        case Fsm::FIX_YAW: {
           state_ = "fix final yaw";
           // Use err_yaw defined relative to desired_yaw; here we want to settle heading
           const double final_err_yaw = err_yaw;
