@@ -1,201 +1,139 @@
-#include <gtest/gtest.h>
-#include <rclcpp/rclcpp.hpp>
-#include <rclcpp_action/rclcpp_action.hpp>
+#include <chrono>
+#include <cmath>
+#include <memory>
+#include <thread>
 
-#include <geometry_msgs/msg/twist.hpp>
-#include <nav_msgs/msg/odometry.hpp>
+#include "rclcpp/rclcpp.hpp"
+#include "rclcpp_action/rclcpp_action.hpp"
+#include "tf2/LinearMath/Quaternion.h"
+#include <tf2/LinearMath/Matrix3x3.h>
 
-#include "fastbot_waypoints/action/waypoint.hpp"
+#include "fastbot_waypoints/action/waypoint_action.hpp"
+#include "geometry_msgs/msg/twist.hpp"
+#include "nav_msgs/msg/odometry.hpp"
 
-using Waypoint = fastbot_waypoints::action::Waypoint;
-using ClientGoalHandleWaypoint = rclcpp_action::ClientGoalHandle<Waypoint>;
+#include "gtest/gtest.h"
 
-static const char *ODOM_TOPIC = "/fastbot/odom";
-static const char *CMDVEL_TOPIC = "/fastbot/cmd_vel";
+using Waypoint = fastbot_waypoints::action::WaypointAction;
+using GoalHandleWaypoint = rclcpp_action::ServerGoalHandle<Waypoint>;
 
-// You can override this at compile time with:
-// target_compile_definitions(test_fastbot_waypoint PRIVATE
-// FASTBOT_WAYPOINT_ACTION_NAME="/custom_name")
-#ifndef FASTBOT_WAYPOINT_ACTION_NAME
-#define FASTBOT_WAYPOINT_ACTION_NAME "/fastbot_waypoint"
-#endif
+using namespace std::chrono_literals;
+using std::placeholders::_1;
+using std::placeholders::_2;
 
-// -------------------- timeouts (seconds) --------------------
-constexpr double ODOM_WAIT_SEC = 30.0;
-constexpr double MOVE_CMD_SEC = 2.0;
-constexpr double SETTLE_SEC = 1.0;
+class RclCppFixture {
+public:
+  RclCppFixture() { rclcpp::init(0, nullptr); }
+  ~RclCppFixture() { rclcpp::shutdown(); }
+};
+RclCppFixture g_rclcppfixture;
 
-// ------------------------------------------------------------------
-// Test fixture bootstraps/shuts down rclcpp once for all tests
-class RosFixture : public ::testing::Test {
+class FastbotActionServerTest : public ::testing::Test {
 protected:
-  static void SetUpTestSuite() { rclcpp::init(0, nullptr); }
-  static void TearDownTestSuite() { rclcpp::shutdown(); }
+  rclcpp::Node::SharedPtr node_;
+  rclcpp_action::Client<Waypoint>::SharedPtr action_client_;
+  rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
+  geometry_msgs::msg::Point current_position_;
+  bool odom_received_ = false;
+  double current_yaw = 0.0;
+  double init_yaw = 0.0;
+  bool init_yaw_received = false;
+  double init_yaw_offset = 1.52;
+
+  void SetUp() override {
+    node_ = rclcpp::Node::make_shared("test_fastbot_action_client");
+    action_client_ =
+        rclcpp_action::create_client<Waypoint>(node_, "fastbot_as");
+
+    // Odometry subscriber
+    odom_sub_ = node_->create_subscription<nav_msgs::msg::Odometry>(
+        "/fastbot/odom", 10,
+        [this](const nav_msgs::msg::Odometry::SharedPtr msg) {
+          current_position_ = msg->pose.pose.position;
+          tf2::Quaternion q(
+              msg->pose.pose.orientation.x, msg->pose.pose.orientation.y,
+              msg->pose.pose.orientation.z, msg->pose.pose.orientation.w);
+          tf2::Matrix3x3 m(q);
+          double roll, pitch;
+          m.getRPY(roll, pitch, current_yaw);
+          odom_received_ = true;
+
+          if (!init_yaw_received) {
+            init_yaw = current_yaw;
+            init_yaw_received = true;
+          }
+        });
+
+    // Wait for the action server to be available
+    ASSERT_TRUE(action_client_->wait_for_action_server(10s));
+  }
+
+  void send_goal(Waypoint::Goal &goal) {
+    // Send the goal to the action server
+    auto send_goal_future = action_client_->async_send_goal(goal);
+    rclcpp::spin_until_future_complete(node_, send_goal_future);
+    auto goal_handle = send_goal_future.get();
+    ASSERT_TRUE(goal_handle);
+
+    // Wait for result
+    auto result_future = action_client_->async_get_result(goal_handle);
+    rclcpp::spin_until_future_complete(node_, result_future);
+    auto result = result_future.get();
+    ASSERT_EQ(result.code, rclcpp_action::ResultCode::SUCCEEDED);
+    ASSERT_TRUE(result.result->success);
+  }
+
+  // Returns true if the current position is within goal threshold
+  bool position_close(double goal_x, double goal_y, double tolerance = 0.1) {
+
+    bool is_close = false;
+    double dx = goal_x - current_position_.x;
+    double dy = goal_y - current_position_.y;
+
+    is_close = (std::abs(dx) <= tolerance && std::abs(dy) <= tolerance);
+
+    return is_close;
+  }
+
+  bool angle_close(double goal_yaw, double tolerance = 0.4) {
+
+    bool is_close = false;
+    double final_yaw = current_yaw;
+    double yaw_diff = final_yaw - goal_yaw;
+
+    is_close = (std::abs(yaw_diff) <= tolerance);
+
+    return is_close;
+  }
 };
 
-// Utility: wall-clock loop helper (spins executor until condition or timeout)
-template <typename Fn>
-bool spin_until(rclcpp::Node::SharedPtr,
-                rclcpp::executors::SingleThreadedExecutor &exec,
-                double timeout_sec, Fn condition,
-                double spin_period_ms = 50.0) {
-  const auto t_start = std::chrono::steady_clock::now();
-  while (rclcpp::ok()) {
-    if (condition())
-      return true;
-    exec.spin_some(std::chrono::milliseconds(static_cast<int>(spin_period_ms)));
-    const auto elapsed = std::chrono::duration<double>(
-                             std::chrono::steady_clock::now() - t_start)
-                             .count();
-    if (elapsed > timeout_sec)
-      break;
-  }
-  return condition();
-}
-
-// ------------------------------------------------------------------
-// 1) Verify /fastbot/odom is publishing
-TEST_F(RosFixture, OdomIsPublishing) {
-  auto node = std::make_shared<rclcpp::Node>("test_odom_is_publishing");
-  nav_msgs::msg::Odometry::SharedPtr last_odom;
-
-  auto sub = node->create_subscription<nav_msgs::msg::Odometry>(
-      ODOM_TOPIC, rclcpp::QoS(10),
-      [&](nav_msgs::msg::Odometry::SharedPtr msg) { last_odom = msg; });
-
-  rclcpp::executors::SingleThreadedExecutor exec;
-  exec.add_node(node);
-
-  bool got = spin_until(node, exec, ODOM_WAIT_SEC,
-                        [&] { return last_odom != nullptr; });
-  exec.remove_node(node);
-
-  ASSERT_TRUE(got) << "No " << ODOM_TOPIC << " received within "
-                   << ODOM_WAIT_SEC << "s. Ensure simulator/robot is running.";
-}
-
-// ------------------------------------------------------------------
-// 2) Publish /fastbot/cmd_vel and verify the robot moved
-TEST_F(RosFixture, RobotMovesWhenCmdVelPublished) {
-  auto node = std::make_shared<rclcpp::Node>("test_robot_moves_on_cmd_vel");
-  nav_msgs::msg::Odometry::SharedPtr first_odom, last_odom;
-
-  auto sub = node->create_subscription<nav_msgs::msg::Odometry>(
-      ODOM_TOPIC, rclcpp::QoS(10), [&](nav_msgs::msg::Odometry::SharedPtr msg) {
-        if (!first_odom)
-          first_odom = msg;
-        last_odom = msg;
-      });
-
-  auto pub =
-      node->create_publisher<geometry_msgs::msg::Twist>(CMDVEL_TOPIC, 10);
-
-  rclcpp::executors::SingleThreadedExecutor exec;
-  exec.add_node(node);
-
-  // Wait for initial odom
-  ASSERT_TRUE(spin_until(node, exec, ODOM_WAIT_SEC,
-                         [&] { return first_odom != nullptr; }))
-      << "No " << ODOM_TOPIC << " received before commanding motion.";
-
-  // Send forward command for ~2s
-  geometry_msgs::msg::Twist cmd;
-  cmd.linear.x = 0.2;
-  const auto t_start = std::chrono::steady_clock::now();
-  while (
-      std::chrono::duration<double>(std::chrono::steady_clock::now() - t_start)
-          .count() < MOVE_CMD_SEC) {
-    pub->publish(cmd);
-    exec.spin_some(std::chrono::milliseconds(50));
-  }
-  // Stop
-  pub->publish(geometry_msgs::msg::Twist());
-
-  // Let odom update
-  (void)spin_until(node, exec, SETTLE_SEC, [&] { return true; });
-
-  exec.remove_node(node);
-
-  ASSERT_TRUE(last_odom != nullptr)
-      << "No odom updates observed after sending /cmd_vel.";
-
-  const double dx =
-      last_odom->pose.pose.position.x - first_odom->pose.pose.position.x;
-  const double dy =
-      last_odom->pose.pose.position.y - first_odom->pose.pose.position.y;
-  const double dist = std::sqrt(dx * dx + dy * dy);
-
-  EXPECT_GT(dist, 0.05) << "Robot did not appear to move after publishing "
-                        << CMDVEL_TOPIC << " for " << MOVE_CMD_SEC
-                        << "s (dist=" << dist << ").";
-}
-
-// ------------------------------------------------------------------
-// 3) Send a small goal to the Waypoint action (near current pose)
-//    Uses spin_until_future_complete so the executor spins while waiting.
-TEST_F(RosFixture, WaypointActionAcceptsAndReturnsResult) {
-  using namespace std::chrono_literals;
-
-  auto node = std::make_shared<rclcpp::Node>("test_waypoint_action");
-  rclcpp::executors::SingleThreadedExecutor exec;
-  exec.add_node(node);
-
-  // Capture one odom to set a near goal
-  nav_msgs::msg::Odometry::SharedPtr odom;
-  auto sub = node->create_subscription<nav_msgs::msg::Odometry>(
-      ODOM_TOPIC, 10, [&](nav_msgs::msg::Odometry::SharedPtr m) { odom = m; });
-
-  ASSERT_TRUE(
-      spin_until(node, exec, ODOM_WAIT_SEC, [&] { return odom != nullptr; }))
-      << "No " << ODOM_TOPIC << " available to compute a near goal.";
-
-  // Connect to action (try canonical, then a few fallbacks)
-  std::vector<std::string> names = {FASTBOT_WAYPOINT_ACTION_NAME,
-                                    "/fastbot/waypoint", "/waypoint",
-                                    "fastbot_waypoint", "waypoint"};
-
-  rclcpp_action::Client<Waypoint>::SharedPtr client;
-  for (const auto &n : names) {
-    auto c = rclcpp_action::create_client<Waypoint>(node, n);
-    if (c->wait_for_action_server(5s)) {
-      client = c;
-      RCLCPP_INFO(node->get_logger(), "Using Waypoint action name: %s",
-                  n.c_str());
-      break;
-    }
-  }
-  ASSERT_TRUE(static_cast<bool>(client))
-      << "Waypoint action server not found on known names.";
-
-  // Build a near goal (small +X step)
+TEST_F(FastbotActionServerTest, RobotReachedGoal) {
+  // Define the goal
   Waypoint::Goal goal;
-  goal.position.x = odom->pose.pose.position.x + 0.20;
-  goal.position.y = odom->pose.pose.position.y;
-  goal.position.z = 0.0;
+  goal.position.x = 1.0;
+  goal.position.y = 1.0;
+  double goal_yaw = 0.0;
 
-  // Send goal WITH executor spinning while waiting
-  rclcpp_action::Client<Waypoint>::SendGoalOptions options; // (feedback unused)
-  auto goal_handle_future = client->async_send_goal(goal, options);
+  double global_goal_yaw = goal_yaw + init_yaw_offset;
 
-  auto ret = exec.spin_until_future_complete(goal_handle_future, 20s);
-  ASSERT_EQ(ret, rclcpp::FutureReturnCode::SUCCESS)
-      << "Goal was not accepted within timeout (is fastbot_action_server "
-         "running?).";
+  // Send the goal
+  send_goal(goal);
 
-  auto goal_handle = goal_handle_future.get();
-  ASSERT_TRUE(goal_handle) << "Goal handle is null (goal not accepted).";
+  // Wait for odometry to settle
+  rclcpp::Rate rate(10);
+  for (int i = 0; i < 50 && !position_close(goal.position.x, goal.position.y);
+       ++i) {
+    rclcpp::spin_some(node_);
+    rate.sleep();
+  }
 
-  // Wait for result, spinning the executor
-  auto result_future = client->async_get_result(goal_handle);
-  ret = exec.spin_until_future_complete(result_future, 60s);
-  exec.remove_node(node);
+  EXPECT_TRUE(position_close(goal.position.x, goal.position.y))
+      << "Robot did not reach the goal: "
+      << "Expected (" << goal.position.x << ", " << goal.position.y << ") "
+      << "but got (" << current_position_.x << ", " << current_position_.y
+      << ")";
 
-  ASSERT_EQ(ret, rclcpp::FutureReturnCode::SUCCESS)
-      << "Action did not finish within timeout.";
-  auto wrapped = result_future.get();
-
-  // If your rubric requires explicit success, uncomment this line:
-  // EXPECT_EQ(wrapped.code, rclcpp_action::ResultCode::SUCCEEDED);
-
-  SUCCEED();
+  EXPECT_TRUE(angle_close(global_goal_yaw))
+      << "Robot did not reach the global goal yaw: " << global_goal_yaw
+      << " Final yaw is: " << current_yaw << " ";
 }

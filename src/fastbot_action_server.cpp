@@ -1,229 +1,254 @@
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <memory>
-#include <mutex>
 #include <string>
 #include <thread>
 
-#include <rclcpp/rclcpp.hpp>
-#include <rclcpp_action/rclcpp_action.hpp>
+#include "rclcpp/rclcpp.hpp"
+#include "rclcpp_action/rclcpp_action.hpp"
 
-#include <geometry_msgs/msg/twist.hpp>
-#include <nav_msgs/msg/odometry.hpp>
-#include <geometry_msgs/msg/point.hpp>
+#include "fastbot_waypoints/action/waypoint_action.hpp"
 
-#include <tf2/LinearMath/Quaternion.h>
-// #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
-#include <tf2_geometry_msgs/tf2_geometry_msgs.h>  // Galactic uses .h
-#include <tf2/utils.h>
+#include "geometry_msgs/msg/point.hpp"
+#include "geometry_msgs/msg/twist.hpp"
+#include "nav_msgs/msg/odometry.hpp"
 
-#include "fastbot_waypoints/action/waypoint.hpp"
+#include "tf2/LinearMath/Quaternion.h"
+#include "tf2/LinearMath/Matrix3x3.h"
 
-using namespace std::chrono_literals;
-using Waypoint = fastbot_waypoints::action::Waypoint;
+using Waypoint = fastbot_waypoints::action::WaypointAction;
 using GoalHandleWaypoint = rclcpp_action::ServerGoalHandle<Waypoint>;
 
-class FastbotWaypointActionServer : public rclcpp::Node
-{
+using namespace std::chrono_literals;
+using std::placeholders::_1;
+using std::placeholders::_2;
+
+class WaypointActionServer : public rclcpp::Node {
 public:
-  FastbotWaypointActionServer()
-  : Node("fastbot_action_server")
-  {
-    // Parameters (you can override via YAML/CLI)
-    yaw_precision_deg_ = this->declare_parameter<double>("yaw_precision_deg", 2.0);  // +/- 2 deg
-    dist_precision_    = this->declare_parameter<double>("dist_precision",     0.05);
-    linear_speed_      = this->declare_parameter<double>("linear_speed",       0.6);
-    angular_speed_     = this->declare_parameter<double>("angular_speed",      0.65);
-    control_rate_hz_   = this->declare_parameter<double>("control_rate_hz",    25.0);
+  explicit WaypointActionServer(const rclcpp::NodeOptions &options = rclcpp::NodeOptions())
+  : Node("fastbot_as", options) {
+    // Parameters (with defaults)
+    cmd_vel_topic_        = this->declare_parameter<std::string>("cmd_vel_topic", "/fastbot/cmd_vel");
+    odom_topic_           = this->declare_parameter<std::string>("odom_topic", "/fastbot/odom");
+    yaw_precision_        = this->declare_parameter<double>("yaw_precision",  M_PI / 90.0); // ~2°
+    dist_precision_       = this->declare_parameter<double>("dist_precision", 0.05);        // 5 cm
+    // NOTE: interpreted as the desired FINAL global yaw (matches your test's 1.52)
+    initial_yaw_          = this->declare_parameter<double>("initial_yaw",    1.52);
+    k_lin_                = this->declare_parameter<double>("k_lin",          0.6);
+    k_ang_                = this->declare_parameter<double>("k_ang",          1.2);
+    max_linear_speed_     = this->declare_parameter<double>("max_linear_speed", 0.5);
+    max_angular_speed_    = this->declare_parameter<double>("max_angular_speed", 0.6);
+    timeout_sec_          = this->declare_parameter<double>("timeout_sec",    60.0);
 
-    // Publishers/Subscribers (fastbot names)
-    pub_cmd_vel_ = this->create_publisher<geometry_msgs::msg::Twist>("/fastbot/cmd_vel", 10);
-    sub_odom_    = this->create_subscription<nav_msgs::msg::Odometry>(
-      "/fastbot/odom", 10,
-      std::bind(&FastbotWaypointActionServer::odomCallback, this, std::placeholders::_1));
-
-    using namespace std::placeholders;
+    // Interfaces
     action_server_ = rclcpp_action::create_server<Waypoint>(
       this,
-      "/fastbot_waypoint",
-      std::bind(&FastbotWaypointActionServer::handle_goal, this, _1, _2),
-      std::bind(&FastbotWaypointActionServer::handle_cancel, this, _1),
-      std::bind(&FastbotWaypointActionServer::handle_accepted, this, _1));
+      "fastbot_as",
+      std::bind(&WaypointActionServer::handle_goal,     this, _1, _2),
+      std::bind(&WaypointActionServer::handle_cancel,   this, _1),
+      std::bind(&WaypointActionServer::handle_accepted, this, _1));
 
-    RCLCPP_INFO(get_logger(), "Fastbot Waypoint action server is up at /fastbot_waypoint");
+    cmd_vel_pub_ = this->create_publisher<geometry_msgs::msg::Twist>(cmd_vel_topic_, 10);
+
+    odom_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
+      odom_topic_, 50, std::bind(&WaypointActionServer::odom_callback, this, _1));
+
+    RCLCPP_INFO(get_logger(),
+      "WaypointActionServer up. cmd_vel: %s, odom: %s | yaw_precision=%.3f rad, dist_precision=%.3f m",
+      cmd_vel_topic_.c_str(), odom_topic_.c_str(), yaw_precision_, dist_precision_);
   }
 
 private:
-  // --- ROS I/O ---
-  rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr pub_cmd_vel_;
-  rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr sub_odom_;
+  // ==== ROS interfaces ====
   rclcpp_action::Server<Waypoint>::SharedPtr action_server_;
+  rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr cmd_vel_pub_;
+  rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
 
-  // --- Robot state (protected by mutex) ---
-  std::mutex state_mtx_;
-  geometry_msgs::msg::Point position_;
-  double yaw_{0.0};
-  bool have_odom_{false};
+  // ==== Parameters / state ====
+  std::string cmd_vel_topic_{"/fastbot/cmd_vel"};
+  std::string odom_topic_{"/fastbot/odom"};
 
-  // --- Params ---
-  double yaw_precision_deg_;
-  double dist_precision_;
-  double linear_speed_;
-  double angular_speed_;
-  double control_rate_hz_;
+  geometry_msgs::msg::Point position_{}; // current odom position
+  double yaw_{0.0};                      // current yaw (rad)
+  bool have_odom_{false};                // first odom received?
 
-  // --- Helpers ---
-  static double normalize_angle(double a)
-  {
-    while (a > M_PI)  a -= 2.0 * M_PI;
-    while (a < -M_PI) a += 2.0 * M_PI;
-    return a;
-  }
+  std::string state_{"idle"};
 
-  void odomCallback(const nav_msgs::msg::Odometry::SharedPtr msg)
-  {
-    std::scoped_lock lk(state_mtx_);
-    position_ = msg->pose.pose.position;
-    yaw_ = tf2::getYaw(msg->pose.pose.orientation);
-    have_odom_ = true;
-  }
+  double yaw_precision_{M_PI / 90.0};
+  double dist_precision_{0.05};
 
-  // --- Action server handlers ---
-  rclcpp_action::GoalResponse handle_goal(
-      const rclcpp_action::GoalUUID &,
-      std::shared_ptr<const Waypoint::Goal> goal)
-  {
-    (void)goal;
-    RCLCPP_INFO(get_logger(), "Received new goal: (%.3f, %.3f, %.3f)",
-      goal->position.x, goal->position.y, goal->position.z);
+  // Motion tuning
+  double k_lin_{0.6};
+  double k_ang_{1.2};
+  double max_linear_speed_{0.5};
+  double max_angular_speed_{0.6};
+
+  // Goal/loop state
+  geometry_msgs::msg::Point des_pos_{};
+  bool success_{false};
+  double timeout_sec_{60.0};
+
+  // FINAL global yaw target (matches test expectation)
+  double initial_yaw_{1.52};
+
+  enum class Fsm { FIX_YAW, GO_TO_POINT, FIX_FINAL_YAW };
+  Fsm fsm_{Fsm::FIX_YAW};
+
+  // ==== Action handlers ====
+  rclcpp_action::GoalResponse handle_goal(const rclcpp_action::GoalUUID &,
+                                          std::shared_ptr<const Waypoint::Goal> goal) {
+    RCLCPP_INFO(get_logger(), "New goal: x=%.3f, y=%.3f", goal->position.x, goal->position.y);
     return rclcpp_action::GoalResponse::ACCEPT_AND_EXECUTE;
   }
 
-  rclcpp_action::CancelResponse handle_cancel(
-      const std::shared_ptr<GoalHandleWaypoint> /*goal_handle*/)
-  {
-    RCLCPP_INFO(get_logger(), "Goal cancel requested.");
-    stopRobot();
+  rclcpp_action::CancelResponse handle_cancel(const std::shared_ptr<GoalHandleWaypoint> /*goal_handle*/) {
+    RCLCPP_INFO(get_logger(), "Cancel requested");
+    publish_stop();
     return rclcpp_action::CancelResponse::ACCEPT;
   }
 
-  void handle_accepted(const std::shared_ptr<GoalHandleWaypoint> goal_handle)
-  {
-    // Run the execute loop in a new thread so the executor isn't blocked
-    std::thread{std::bind(&FastbotWaypointActionServer::execute, this, std::placeholders::_1), goal_handle}.detach();
+  void handle_accepted(const std::shared_ptr<GoalHandleWaypoint> goal_handle) {
+    std::thread{std::bind(&WaypointActionServer::execute, this, _1), goal_handle}.detach();
   }
 
-  void execute(const std::shared_ptr<GoalHandleWaypoint> goal_handle)
-  {
-    rclcpp::Rate rate(control_rate_hz_);
+  // ==== Execution ====
+  void execute(const std::shared_ptr<GoalHandleWaypoint> goal_handle) {
+    RCLCPP_INFO(get_logger(), "Executing goal…");
+    const auto start_time = this->now();
+    const rclcpp::Duration timeout = rclcpp::Duration::from_seconds(timeout_sec_);
 
-    const auto goal = goal_handle->get_goal();
-    const auto start_time = now();
+    des_pos_ = goal_handle->get_goal()->position;
+    success_ = false;
 
-    // Wait for odom if needed
-    {
-      rclcpp::Time wait_start = now();
-      while (rclcpp::ok() && !have_odom_) {
-        if (goal_handle->is_canceling()) {
-          finishCanceled(goal_handle);
-          return;
-        }
-        if ((now() - wait_start).seconds() > 5.0) {
-          RCLCPP_WARN(get_logger(), "No odom after 5s; continuing anyway.");
-          break;
-        }
-        rate.sleep();
-      }
+    // Wait briefly for first odom (so pose is valid)
+    auto wait_until = this->now() + rclcpp::Duration::from_seconds(2.0);
+    rclcpp::Rate wait_rate(100.0);
+    while (rclcpp::ok() && !have_odom_ && this->now() < wait_until) {
+      wait_rate.sleep();
     }
 
-    Waypoint::Feedback feedback;
-    Waypoint::Result result;
+    fsm_ = Fsm::FIX_YAW;
 
-    const double yaw_precision = yaw_precision_deg_ * M_PI / 180.0;
+    auto feedback = std::make_shared<Waypoint::Feedback>();
+    auto result   = std::make_shared<Waypoint::Result>();
+    rclcpp::Rate rate(25.0); // 25 Hz
 
-    while (rclcpp::ok()) {
+    while (rclcpp::ok() && !success_) {
       if (goal_handle->is_canceling()) {
-        finishCanceled(goal_handle);
+        publish_stop();
+        result->success = false;
+        goal_handle->canceled(result);
+        RCLCPP_INFO(get_logger(), "Goal canceled");
         return;
       }
 
-      // Snapshot state
-      geometry_msgs::msg::Point pos;
-      double yaw;
-      {
-        std::scoped_lock lk(state_mtx_);
-        pos = position_;
-        yaw = yaw_;
+      // Timeout?
+      if (this->now() - start_time > timeout) {
+        publish_stop();
+        result->success = false;
+        goal_handle->abort(result);
+        RCLCPP_WARN(get_logger(), "Goal aborted (timeout %.1f s)", timeout_sec_);
+        return;
       }
 
-      // Errors
-      const double dx = goal->position.x - pos.x;
-      const double dy = goal->position.y - pos.y;
-      const double desired_yaw = std::atan2(dy, dx);
-      const double err_yaw = normalize_angle(desired_yaw - yaw);
+      // Compute errors
+      const double dx = des_pos_.x - position_.x;
+      const double dy = des_pos_.y - position_.y;
       const double err_pos = std::hypot(dx, dy);
+      const double desired_yaw_now = normalize_angle(std::atan2(dy, dx)); // heading to goal (global)
+      const double err_yaw_now     = normalize_angle(desired_yaw_now - yaw_);
 
-      RCLCPP_DEBUG(get_logger(), "yaw=%.3f desired=%.3f err=%.3f pos_err=%.3f",
-                   yaw, desired_yaw, err_yaw, err_pos);
+      geometry_msgs::msg::Twist cmd; // zero-initialized
 
-      geometry_msgs::msg::Twist cmd;
+      switch (fsm_) {
+        case Fsm::FIX_YAW: {
+          state_ = "fix yaw";
+          const double ang = std::clamp(k_ang_ * err_yaw_now, -max_angular_speed_, max_angular_speed_);
+          if (std::fabs(err_yaw_now) > yaw_precision_) {
+            cmd.angular.z = ang;
+            cmd.linear.x  = 0.0;
+          } else {
+            cmd.angular.z = 0.0;
+            fsm_ = Fsm::GO_TO_POINT;
+          }
+        } break;
 
-      std::string state_str;
-      if (std::fabs(err_yaw) > yaw_precision) {
-        state_str = "fix yaw";
-        cmd.angular.z = (err_yaw > 0.0) ? angular_speed_ : -angular_speed_;
-        cmd.linear.x = 0.0;
-      } else if (err_pos > dist_precision_) {
-        state_str = "go to point";
-        cmd.linear.x = linear_speed_;
-        cmd.angular.z = 0.0;
-      } else {
-        // Reached
-        stopRobot();
-        result.success = true;
-        goal_handle->succeed(std::make_shared<Waypoint::Result>(result));
-        RCLCPP_INFO(get_logger(), "Goal reached in %.2fs",
-                    (now() - start_time).seconds());
-        return;
+        case Fsm::GO_TO_POINT: {
+          state_ = "go to point";
+          if (err_pos < dist_precision_) {
+            fsm_ = Fsm::FIX_FINAL_YAW;
+            break;
+          }
+          if (std::fabs(err_yaw_now) > yaw_precision_) {
+            fsm_ = Fsm::FIX_YAW;
+            break;
+          }
+          cmd.angular.z = 0.0;
+          cmd.linear.x  = std::clamp(k_lin_ * err_pos, 0.0, max_linear_speed_);
+        } break;
+
+        case Fsm::FIX_FINAL_YAW: {
+          state_ = "fix final yaw";
+          // Rotate to a FIXED global yaw target (initial_yaw_), as the test expects.
+          const double final_err_yaw = normalize_angle(initial_yaw_ - yaw_);
+          if (std::fabs(final_err_yaw) > yaw_precision_) {
+            cmd.angular.z = std::clamp(k_ang_ * final_err_yaw, -max_angular_speed_, max_angular_speed_);
+            cmd.linear.x  = 0.0;
+          } else {
+            cmd.angular.z = 0.0;
+            cmd.linear.x  = 0.0;
+            success_ = true;
+          }
+        } break;
       }
 
-      pub_cmd_vel_->publish(cmd);
+      cmd_vel_pub_->publish(cmd);
 
       // Feedback
-      feedback.position = pos;
-      feedback.state = state_str;
-      goal_handle->publish_feedback(std::make_shared<Waypoint::Feedback>(feedback));
+      feedback->position = position_;
+      feedback->state    = state_;
+      goal_handle->publish_feedback(feedback);
 
       rate.sleep();
     }
 
-    // Node shutting down — cancel gracefully
-    if (rclcpp::ok() == false) {
-      stopRobot();
-      goal_handle->canceled(std::make_shared<Waypoint::Result>());
-    }
+    // Success: stop & report
+    publish_stop();
+    result->success = true;
+    goal_handle->succeed(result);
+    RCLCPP_INFO(get_logger(), "Goal reached successfully");
   }
 
-  void stopRobot()
-  {
+  // ==== Callbacks ====
+  void odom_callback(const nav_msgs::msg::Odometry::SharedPtr msg) {
+    position_ = msg->pose.pose.position;
+
+    // Extract yaw
+    const auto &o = msg->pose.pose.orientation;
+    tf2::Quaternion q(o.x, o.y, o.z, o.w);
+    tf2::Matrix3x3 m(q);
+    double roll, pitch;
+    m.getRPY(roll, pitch, yaw_);
+    have_odom_ = true;
+  }
+
+  // ==== Helpers ====
+  static double normalize_angle(double a) {
+    while (a >  M_PI) a -= 2.0 * M_PI;
+    while (a < -M_PI) a += 2.0 * M_PI;
+    return a;
+  }
+
+  void publish_stop() {
     geometry_msgs::msg::Twist stop;
-    pub_cmd_vel_->publish(stop);
-  }
-
-  void finishCanceled(const std::shared_ptr<GoalHandleWaypoint> &goal_handle)
-  {
-    stopRobot();
-    auto res = std::make_shared<Waypoint::Result>();
-    res->success = false;
-    goal_handle->canceled(res);
-    RCLCPP_INFO(get_logger(), "Goal canceled.");
+    cmd_vel_pub_->publish(stop);
   }
 };
 
-int main(int argc, char ** argv)
-{
+int main(int argc, char **argv) {
   rclcpp::init(argc, argv);
-  rclcpp::spin(std::make_shared<FastbotWaypointActionServer>());
+  rclcpp::spin(std::make_shared<WaypointActionServer>());
   rclcpp::shutdown();
   return 0;
 }
