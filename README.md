@@ -12,8 +12,9 @@ source ~/ros2_ws/install/setup.bash
 ros2 run fastbot_waypoints fastbot_action_server
 ```
 
-## at the simulation start, robot start at this position
-we are going to fail by moving within safe range and fail by sending robot out of floor
+## Passing/Failing test
+we are going to pass test by moving within safe range within living room and fail by sending robot out of floor.
+at the simulation start, robot start at this position
 ```bash
 pose:
   pose:
