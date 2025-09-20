@@ -28,13 +28,12 @@ class WaypointActionServer : public rclcpp::Node {
 public:
   explicit WaypointActionServer(const rclcpp::NodeOptions &options = rclcpp::NodeOptions())
   : Node("fastbot_as", options) {
-    // Parameters (with defaults)
+    // Declare parameters (with defaults)
     cmd_vel_topic_        = this->declare_parameter<std::string>("cmd_vel_topic", "/fastbot/cmd_vel");
     odom_topic_           = this->declare_parameter<std::string>("odom_topic", "/fastbot/odom");
     yaw_precision_        = this->declare_parameter<double>("yaw_precision",  M_PI / 90.0); // ~2°
     dist_precision_       = this->declare_parameter<double>("dist_precision", 0.05);        // 5 cm
-    // NOTE: interpreted as the desired FINAL global yaw (matches your test's 1.52)
-    initial_yaw_          = this->declare_parameter<double>("initial_yaw",    1.52);
+    initial_yaw_          = this->declare_parameter<double>("initial_yaw",    1.52);        // robot spawn offset
     k_lin_                = this->declare_parameter<double>("k_lin",          0.6);
     k_ang_                = this->declare_parameter<double>("k_ang",          1.2);
     max_linear_speed_     = this->declare_parameter<double>("max_linear_speed", 0.5);
@@ -71,8 +70,7 @@ private:
 
   geometry_msgs::msg::Point position_{}; // current odom position
   double yaw_{0.0};                      // current yaw (rad)
-  bool have_odom_{false};                // first odom received?
-
+  double initial_yaw_{1.52};             // static offset on your platform
   std::string state_{"idle"};
 
   double yaw_precision_{M_PI / 90.0};
@@ -88,9 +86,6 @@ private:
   geometry_msgs::msg::Point des_pos_{};
   bool success_{false};
   double timeout_sec_{60.0};
-
-  // FINAL global yaw target (matches test expectation)
-  double initial_yaw_{1.52};
 
   enum class Fsm { FIX_YAW, GO_TO_POINT, FIX_FINAL_YAW };
   Fsm fsm_{Fsm::FIX_YAW};
@@ -115,19 +110,11 @@ private:
   // ==== Execution ====
   void execute(const std::shared_ptr<GoalHandleWaypoint> goal_handle) {
     RCLCPP_INFO(get_logger(), "Executing goal…");
-    const auto start_time = this->now();
-    const rclcpp::Duration timeout = rclcpp::Duration::from_seconds(timeout_sec_);
+    auto start_time = this->now();
+    rclcpp::Duration timeout = rclcpp::Duration::from_seconds(timeout_sec_);
 
     des_pos_ = goal_handle->get_goal()->position;
     success_ = false;
-
-    // Wait briefly for first odom (so pose is valid)
-    auto wait_until = this->now() + rclcpp::Duration::from_seconds(2.0);
-    rclcpp::Rate wait_rate(100.0);
-    while (rclcpp::ok() && !have_odom_ && this->now() < wait_until) {
-      wait_rate.sleep();
-    }
-
     fsm_ = Fsm::FIX_YAW;
 
     auto feedback = std::make_shared<Waypoint::Feedback>();
@@ -156,21 +143,22 @@ private:
       const double dx = des_pos_.x - position_.x;
       const double dy = des_pos_.y - position_.y;
       const double err_pos = std::hypot(dx, dy);
-      const double desired_yaw_now = normalize_angle(std::atan2(dy, dx)); // heading to goal (global)
-      const double err_yaw_now     = normalize_angle(desired_yaw_now - yaw_);
+      const double desired_yaw = normalize_angle(std::atan2(dy, dx));
+      const double err_yaw = normalize_angle(desired_yaw - (yaw_ - initial_yaw_));
 
-      geometry_msgs::msg::Twist cmd; // zero-initialized
+      geometry_msgs::msg::Twist cmd; // auto-zeroed
 
       switch (fsm_) {
         case Fsm::FIX_YAW: {
           state_ = "fix yaw";
-          const double ang = std::clamp(k_ang_ * err_yaw_now, -max_angular_speed_, max_angular_speed_);
-          if (std::fabs(err_yaw_now) > yaw_precision_) {
+          const double ang = std::clamp(k_ang_ * err_yaw, -max_angular_speed_, max_angular_speed_);
+          if (std::fabs(err_yaw) > yaw_precision_) {
             cmd.angular.z = ang;
             cmd.linear.x  = 0.0;
           } else {
             cmd.angular.z = 0.0;
             fsm_ = Fsm::GO_TO_POINT;
+            // continue to next iteration to compute fresh errors
           }
         } break;
 
@@ -180,7 +168,7 @@ private:
             fsm_ = Fsm::FIX_FINAL_YAW;
             break;
           }
-          if (std::fabs(err_yaw_now) > yaw_precision_) {
+          if (std::fabs(err_yaw) > yaw_precision_) {
             fsm_ = Fsm::FIX_YAW;
             break;
           }
@@ -190,8 +178,8 @@ private:
 
         case Fsm::FIX_FINAL_YAW: {
           state_ = "fix final yaw";
-          // Rotate to a FIXED global yaw target (initial_yaw_), as the test expects.
-          const double final_err_yaw = normalize_angle(initial_yaw_ - yaw_);
+          // Use err_yaw defined relative to desired_yaw; here we want to settle heading
+          const double final_err_yaw = err_yaw;
           if (std::fabs(final_err_yaw) > yaw_precision_) {
             cmd.angular.z = std::clamp(k_ang_ * final_err_yaw, -max_angular_speed_, max_angular_speed_);
             cmd.linear.x  = 0.0;
@@ -230,7 +218,6 @@ private:
     tf2::Matrix3x3 m(q);
     double roll, pitch;
     m.getRPY(roll, pitch, yaw_);
-    have_odom_ = true;
   }
 
   // ==== Helpers ====

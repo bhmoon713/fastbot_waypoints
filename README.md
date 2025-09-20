@@ -12,27 +12,9 @@ source ~/ros2_ws/install/setup.bash
 ros2 run fastbot_waypoints fastbot_action_server
 ```
 
-#for passing result
-## and run below test commands(Terminal 3)
+## at the simulation start, robot start at this position
+we are going to fail by moving within safe range and fail by sending robot out of floor
 ```bash
-cd ~/ros2_ws && colcon build && source install/setup.bash
-colcon test --packages-select fastbot_waypoints --event-handler=console_direct+
-colcon test-result --all
-```
-
-#for failing result
-Edit file "test_fastbot_waypoint.cpp"
-
-Line 128 
-EXPECT_GT(dist, 0.05) -- > EXPECT_GT(dist, 10.0)
-
-## and run below test commands(Terminal 3)
-```bash
-cd ~/ros2_ws && colcon build && source install/setup.bash
-colcon test --packages-select fastbot_waypoints --event-handler=console_direct+
-colcon test-result --all
-
-
 pose:
   pose:
     position:
@@ -44,4 +26,38 @@ pose:
       y: -7.678504335708343e-05
       z: -0.048928986716355836
       w: 0.9988022373198268
-      
+``` 
+## for passing result
+Edit file "test_fastbot_waypoint.cpp"
+LINE112 
+```bash
+  // Define the goal
+  Waypoint::Goal goal;
+  goal.position.x = 2.0;
+  goal.position.y = 2.0;
+  double goal_yaw = 1.57;
+``` 
+## and run below test commands(Terminal 3)
+```bash
+cd ~/ros2_ws && colcon build && source install/setup.bash
+colcon test --packages-select fastbot_waypoints --event-handler=console_direct+
+colcon test-result --all
+```
+
+## for failing result
+Edit file "test_fastbot_waypoint.cpp"
+
+strike out LINE118 
+  // Define the goal for fail
+  Waypoint::Goal goal;
+    goal.position.x = -1.0;
+    goal.position.y = 0.0;
+    double goal_yaw = 1.57;
+
+## and run below test commands(Terminal 3)
+```bash
+cd ~/ros2_ws && colcon build && source install/setup.bash
+colcon test --packages-select fastbot_waypoints --event-handler=console_direct+
+colcon test-result --all
+
+
